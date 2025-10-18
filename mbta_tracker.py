@@ -122,7 +122,7 @@ def iso_to_local_str(iso_str: str) -> str:
     if not iso_str:
         return ""
     dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
-    return dt.astimezone(TZ).strftime("%-I:%M:%S %p")
+    return dt.astimezone(TZ).strftime("%#I:%M:%S %p")
 
 def fetch_predictions(stop_id: str, route_id: str, direction_id: Optional[int]) -> List[dict]:
     """
