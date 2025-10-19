@@ -29,18 +29,15 @@ CONFIG = [
     # Haymarket — Orange line (both)
     {"station_name": "Haymarket", "routes": ["Orange"], "directions": ["inbound", "outbound"]},
 
-    # Park Street — Red line (both)
-    {"station_name": "Park Street", "routes": ["Red"], "directions": ["inbound", "outbound"]},
-
-    # Park Street — Green line (both) -> cover all branches that serve Park Street
-    {"station_name": "Park Street", "routes": ["Green-B", "Green-C", "Green-D", "Green-E"], "directions": ["inbound", "outbound"]},
+    # Park Street — Red line (both) and Green line (both)
+    {"station_name": "Park Street", "routes": ["Red", "Green-B", "Green-C", "Green-D", "Green-E"], "directions": ["inbound", "outbound"]},
 
     # Government Center — Green line (both)
     {"station_name": "Government Center", "routes": ["Green-B", "Green-C", "Green-D", "Green-E"], "directions": ["inbound", "outbound"]},
 ]
 
 POLL_SECONDS = 30
-MAX_PREDICTIONS_PER_BUCKET = 2  # show top N per (station, route, direction)
+MAX_PREDICTIONS_PER_BUCKET = 3  # show top N per (station, route, direction)
 HTTP_TIMEOUT = 15
 
 # --------- Helper functions ---------
@@ -129,26 +126,22 @@ def iso_to_local_str(iso_str: str) -> str:
     dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
     return dt.astimezone(TZ).strftime("%#I:%M:%S %p")
 
-def fetch_predictions(stop_id: str, route_id: str, direction_id: Optional[int]) -> List[dict]:
+def fetch_predictions(stop_id: str, route_ids: list[str]) -> List[dict]:
     """
     Fetch predictions for a station (parent stop id like 'place-pktrm').
     We filter by route and (optionally) direction_id.
     """
     params = {
         "filter[stop]": stop_id,
-        "filter[route]": route_id,
-        "include": "route,stop,trip",
+        "filter[route]": ",".join(route_ids),
         "sort": "arrival_time,departure_time",
-        "page[limit]": 25,
+        "page[limit]": 10,
+        "include": "trip",
         "fields[prediction]": "arrival_time,departure_time,direction_id,stop,trip,route",
         "fields[trip]": "headsign",
-        "fields[route]": "long_name,short_name"
     }
-    if direction_id is not None:
-        params["filter[direction_id]"] = direction_id
-
     j = mbta_get("/predictions", params=params)
-    return j.get("data", [])
+    return j.get("data", []), j.get("included", [])
 
 def summarize_prediction(p: dict, default_headsign: str = "") -> Tuple[Optional[int], str, int]:
     attrs = p.get("attributes", {})
@@ -184,10 +177,13 @@ def print_header(title: str):
     print("\n" + "=" * 80)
     print(title)
     print("=" * 80)
+    
+def is_green_branch(route_id: str) -> bool:
+    return route_id.startswith("Green-")
 
 def main():
-    # Resolve station parent ids per configuration
-    resolved_targets = []  # list of dicts with: station_name, route_id, directions, parent_ids
+    # Resolve station parent ids per configuration (one-time)
+    resolved_targets = []  # list of dicts with: station_name, route_ids, directions, parent_ids
     for item in CONFIG:
         station = item["station_name"]
         routes = item["routes"]
@@ -217,40 +213,73 @@ def main():
             now_local = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
             print_header(f"MBTA Live Predictions @ {now_local}")
 
+            # Stable display order; Green branches are grouped under "Green"
+            route_order = ["Blue", "Orange", "Red", "Green"]
+
             for t in resolved_targets:
                 station = t["station_name"]
                 parent_ids = t["parent_ids"]
+                routes = t["routes"]
                 if not parent_ids:
                     continue
 
-                for rid in t["routes"]:
-                    dir_map = get_route_direction_map(rid)
-                    for human_dir in t["directions"]:
-                        direction_id = dir_map.get(human_dir.lower())
-                        # Some routes might not provide a clear mapping; if missing, fetch both
-                        dir_ids_to_try = [direction_id] if direction_id is not None else [0, 1]
+                # ---- Gather all predictions across all parent_ids for this station ----
+                # buckets: display_route_id -> list[(mins, headsign)]
+                buckets: Dict[str, list] = {}
 
-                        for pid in parent_ids:
-                            # Gather predictions across the direction ids we want
-                            bucket = []
-                            for d_id in dir_ids_to_try:
-                                preds = fetch_predictions(pid, rid, d_id)
-                                for p in preds:
-                                    mins, headsign, dir_id = summarize_prediction(p)
-                                    if mins is not None:
-                                        bucket.append((mins, headsign, dir_id))
+                for pid in parent_ids:
+                    # One batched predictions call per station/place id
+                    preds, included = fetch_predictions(pid, routes)
 
-                            # Deduplicate and sort by time string (already chronological by API, but safe to sort)
-                            # Note: sorting lexicographically is fine because we format as %I:%M:%S %p each tick.
-                            # Sort numerically by minutes, dedupe
-                            bucket = sorted(set(bucket), key=lambda x: x[0])[:MAX_PREDICTIONS_PER_BUCKET]
+                    # Map trip_id -> headsign (if included)
+                    trip_headsign: Dict[str, str] = {}
+                    for inc in included or []:
+                        if inc.get("type") == "trip":
+                            trip_headsign[inc["id"]] = inc.get("attributes", {}).get("headsign", "")
 
-                            # Print as “N min”
-                            dir_label = human_dir.capitalize()
-                            print(f"{station} | Route {rid} | {dir_label}")
-                            for mins, headsign, dir_id in bucket:
-                                hs = f" — {headsign}" if headsign else ""
-                                print(f"  • {mins} min{hs}")
+                    # Partition predictions locally by route & direction
+                    for p in preds or []:
+                        attrs = p.get("attributes", {})
+                        rel = p.get("relationships", {})
+
+                        rid = rel.get("route", {}).get("data", {}).get("id")   # e.g. "Green-D" or "Red"
+                        iso = attrs.get("arrival_time") or attrs.get("departure_time")
+                        if not rid or not iso:
+                            continue
+
+                        mins = minutes_until(iso)
+                        if mins is None:
+                            continue
+
+                        # Group all Green branches under a single "Green" display route
+                        display_rid = "Green" if rid.startswith("Green-") else rid
+
+                        # Head-sign, optionally append branch letter for Green
+                        trip_id = rel.get("trip", {}).get("data", {}).get("id")
+                        hs = trip_headsign.get(trip_id, "")
+                        if rid.startswith("Green-"):
+                            try:
+                                branch = rid.split("-")[1]  # B/C/D/E
+                                if hs and f"({branch})" not in hs:
+                                    hs = f"{hs} ({branch})"
+                            except Exception:
+                                pass
+
+                        buckets.setdefault(display_rid, []).append((mins, hs))
+
+                # ---- Print one block per station, then per route (no direction split) ----
+                print(station)
+
+                for display_rid in [r for r in route_order if r in buckets]:
+                    # Sort by minutes, dedupe exact duplicates, then take top N
+                    items = sorted(set(buckets[display_rid]), key=lambda x: x[0])[:MAX_PREDICTIONS_PER_BUCKET]
+
+                    # Route subheader with "Line"
+                    print(f"  {display_rid} Line")
+                    for mins, hs in items:
+                        suffix = f" — {hs}" if hs else ""
+                        print(f"    • {mins} min{suffix}")
+
             # Sleep until next poll
             time.sleep(POLL_SECONDS)
     except KeyboardInterrupt:
