@@ -6,14 +6,19 @@ import requests
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 import pytz
+from dotenv import load_dotenv
+
+load_dotenv()  # reads the .env file and sets environment variables
 
 MBTA_API_BASE = "https://api-v3.mbta.com"
 API_KEY = os.getenv("MBTA_API_KEY")  # optional but recommended
+print(f"API_KEY loaded? {API_KEY is not None} (value hidden)")
 TZ = pytz.timezone("America/New_York")
 
 SESSION = requests.Session()
 if API_KEY:
     SESSION.headers.update({"x-api-key": API_KEY})
+
 
 # --------- Configuration (what you asked for) ---------
 # We’ll search for the station by its public name, then filter predictions per route and direction.
@@ -35,7 +40,7 @@ CONFIG = [
 ]
 
 POLL_SECONDS = 30
-MAX_PREDICTIONS_PER_BUCKET = 5  # show top N per (station, route, direction)
+MAX_PREDICTIONS_PER_BUCKET = 2  # show top N per (station, route, direction)
 HTTP_TIMEOUT = 15
 
 # --------- Helper functions ---------
@@ -145,19 +150,35 @@ def fetch_predictions(stop_id: str, route_id: str, direction_id: Optional[int]) 
     j = mbta_get("/predictions", params=params)
     return j.get("data", [])
 
-def summarize_prediction(p: dict, default_headsign: str = "") -> Tuple[str, str, int]:
+def summarize_prediction(p: dict, default_headsign: str = "") -> Tuple[Optional[int], str, int]:
     attrs = p.get("attributes", {})
     arr = attrs.get("arrival_time")
     dep = attrs.get("departure_time")
     when_iso = arr or dep
-    when_local = iso_to_local_str(when_iso) if when_iso else "—"
+    mins = minutes_until(when_iso) if when_iso else None
     dir_id = attrs.get("direction_id", -1)
 
-    # Try to extract headsign from included trip if present
-    headsign = default_headsign
-    # Fallback: MBTA includes trip relationship id; headsign sometimes shows up in included data,
-    # but to keep this lightweight we’ll prefer times; headsign may not always be available.
-    return (when_local, headsign, dir_id)
+    headsign = default_headsign  # (keep if you later wire in trip headsign)
+    return (mins, headsign, dir_id)
+
+def minutes_until(iso_str: Optional[str], now: Optional[datetime] = None) -> Optional[int]:
+    """
+    Return whole minutes from 'now' until the given ISO time.
+    Uses UTC for comparison because MBTA times are in UTC.
+    Returns None if iso_str is falsy or unparsable.
+    Floors to 0 for past/near-past times.
+    """
+    if not iso_str:
+        return None
+    try:
+        target = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))  # aware UTC
+        now = now or datetime.now(timezone.utc)
+        delta_sec = (target - now).total_seconds()
+        mins = int(delta_sec // 60)  # floor
+        return max(0, mins)
+    except Exception:
+        return None
+
 
 def print_header(title: str):
     print("\n" + "=" * 80)
@@ -215,23 +236,21 @@ def main():
                             for d_id in dir_ids_to_try:
                                 preds = fetch_predictions(pid, rid, d_id)
                                 for p in preds:
-                                    when_local, headsign, dir_id = summarize_prediction(p)
-                                    if when_local != "—":
-                                        bucket.append((when_local, headsign, dir_id))
+                                    mins, headsign, dir_id = summarize_prediction(p)
+                                    if mins is not None:
+                                        bucket.append((mins, headsign, dir_id))
 
                             # Deduplicate and sort by time string (already chronological by API, but safe to sort)
                             # Note: sorting lexicographically is fine because we format as %I:%M:%S %p each tick.
+                            # Sort numerically by minutes, dedupe
                             bucket = sorted(set(bucket), key=lambda x: x[0])[:MAX_PREDICTIONS_PER_BUCKET]
 
-                            # Pretty print
+                            # Print as “N min”
                             dir_label = human_dir.capitalize()
                             print(f"{station} | Route {rid} | {dir_label}")
-                            if bucket:
-                                for when_local, headsign, dir_id in bucket:
-                                    hs = f" — {headsign}" if headsign else ""
-                                    print(f"  • {when_local}{hs}")
-                            else:
-                                print("  (no upcoming predictions)")
+                            for mins, headsign, dir_id in bucket:
+                                hs = f" — {headsign}" if headsign else ""
+                                print(f"  • {mins} min{hs}")
             # Sleep until next poll
             time.sleep(POLL_SECONDS)
     except KeyboardInterrupt:
