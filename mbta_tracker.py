@@ -12,7 +12,6 @@ load_dotenv()  # reads the .env file and sets environment variables on process s
 
 MBTA_API_BASE = "https://api-v3.mbta.com"  # base URL for MBTA v3 API
 API_KEY = os.getenv("MBTA_API_KEY")  # optional but recommended; improves rate limits
-print(f"API_KEY loaded? {API_KEY is not None} (value hidden)")  # debug visibility only
 TZ = pytz.timezone("America/New_York")  # local display timezone for Boston area
 
 SESSION = requests.Session()  # reuse TCP connection across requests
@@ -37,7 +36,7 @@ CONFIG = [
 ]
 
 POLL_SECONDS = 30  # how often to poll MBTA in the main loop
-MAX_PREDICTIONS_PER_BUCKET = 3  # show top N per (station, route) after sorting
+MAX_PREDICTIONS_PER_BUCKET = 5  # show top N per (station, route) after sorting
 HTTP_TIMEOUT = 15  # seconds; network timeout per HTTP call
 
 
