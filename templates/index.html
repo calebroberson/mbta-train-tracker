@@ -223,8 +223,8 @@
     }
 
     function buildRoute(route) {
-      const arrivals = (route.arrivals.slice(0, 2)).length
-        ? route.arrivals.slice(0, 2).map(buildArrival).join('')
+      const arrivals = route.arrivals.length
+        ? route.arrivals.map(buildArrival).join('')
         : '<div class="no-predictions">No predictions</div>';
       return `
         <div class="route">
