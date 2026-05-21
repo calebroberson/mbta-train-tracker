@@ -2,11 +2,13 @@
 import os
 import sys
 import time
+import threading
 import requests
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 import pytz
 from dotenv import load_dotenv
+from flask import Flask, jsonify, render_template
 
 load_dotenv()  # must run before any os.getenv call
 
@@ -17,6 +19,8 @@ TZ = pytz.timezone("America/New_York")
 SESSION = requests.Session()  # reuse TCP connection across requests
 if API_KEY:
     SESSION.headers.update({"x-api-key": API_KEY})  # attach once; all requests inherit it
+
+app = Flask(__name__)
 
 
 # --------- Configuration ---------
@@ -32,6 +36,19 @@ CONFIG = [
 POLL_SECONDS = 30              # seconds between prediction refreshes
 MAX_PREDICTIONS_PER_BUCKET = 5  # max arrivals shown per route per station
 HTTP_TIMEOUT = 15              # seconds before an API request is aborted
+
+ROUTE_COLORS = {
+    "Blue":   "#003DA5",
+    "Orange": "#ED8B00",
+    "Red":    "#DA291C",
+    "Green":  "#00843D",
+}
+
+
+# --------- Shared display state ---------
+# Written by the background fetch thread, read by Flask request handlers.
+_display_lock = threading.Lock()
+_display_data: dict = {"stations": [], "last_updated": None, "error": None}
 
 
 # --------- API helpers ---------
@@ -138,51 +155,34 @@ def minutes_until(iso_str: Optional[str], now: Optional[datetime] = None) -> Opt
         return None
 
 
-def print_header(title: str):
-    print("\n" + "=" * 80)
-    print(title)
-    print("=" * 80)
+# --------- Flask routes ---------
+
+@app.route("/")
+def index():
+    return render_template("index.html")
 
 
-# --------- Main loop ---------
+@app.route("/data")
+def data():
+    with _display_lock:
+        return jsonify(_display_data)
 
-def main():
+
+# --------- Fetch loop ---------
+
+def _fetch_loop(resolved_targets: list):
     """
-    One-time setup followed by an infinite poll loop.
-
-    On startup, station names are resolved to MBTA parent place IDs. Then every
-    POLL_SECONDS, predictions are fetched for each station, grouped by route, and
-    printed. Green branches (B/C/D/E) are collapsed into a single 'Green' row
-    with the branch letter appended to each headsign. Runs until Ctrl+C.
+    Runs forever in a background thread, writing fresh prediction data to
+    _display_data every POLL_SECONDS. Errors are caught so the thread never dies.
     """
-    # Resolve station names to parent place IDs once at startup
-    resolved_targets = []
-    for item in CONFIG:
-        station = item["station_name"]
-        routes = item["routes"]
-        parent_ids = find_station_parent_ids_for_routes(station, routes)
-        if not parent_ids:
-            print(f"[WARN] Could not find any parent stop ids for '{station}' (routes: {routes})")
-        resolved_targets.append({"station_name": station, "routes": routes, "parent_ids": parent_ids})
+    route_order = ["Blue", "Orange", "Red", "Green"]  # fixed display order
 
-    if all(len(t["parent_ids"]) == 0 for t in resolved_targets):  # every station failed to resolve
-        print("[FATAL] No stations resolved. Check station names or network connectivity.")
-        sys.exit(1)
-
-    print("Resolved stations:")
-    for t in resolved_targets:
-        print(f"  - {t['station_name']}: parents {t['parent_ids']} (routes: {', '.join(t['routes'])})")
-    print("\nStarting live polling… Press Ctrl+C to stop.")
-
-    try:
-        while True:
-            now_local = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
-            print_header(f"MBTA Live Predictions @ {now_local}")
-
-            route_order = ["Blue", "Orange", "Red", "Green"]  # fixed display order across all stations
+    while True:
+        try:
+            stations_out = []
 
             for t in resolved_targets:
-                station = t["station_name"]
+                station_name = t["station_name"]
                 parent_ids = t["parent_ids"]
                 routes = t["routes"]
                 if not parent_ids:
@@ -230,19 +230,63 @@ def main():
 
                         buckets.setdefault(display_rid, []).append((mins, hs))
 
-                print(station)
-                for display_rid in [r for r in route_order if r in buckets]:  # filter to present routes, preserving order
+                # Convert buckets to a JSON-serialisable list of route dicts
+                routes_out = []
+                for display_rid in [r for r in route_order if r in buckets]:  # preserve fixed display order
                     # Deduplicate exact (mins, headsign) pairs, sort by time, then cap at N
                     items = sorted(set(buckets[display_rid]), key=lambda x: x[0])[:MAX_PREDICTIONS_PER_BUCKET]
-                    print(f"  {display_rid} Line")
-                    for mins, hs in items:
-                        suffix = f" — {hs}" if hs else ""
-                        print(f"    • {mins} min{suffix}")
+                    routes_out.append({
+                        "name": display_rid,
+                        "color": ROUTE_COLORS.get(display_rid, "#888888"),
+                        "arrivals": [{"mins": m, "headsign": h} for m, h in items],
+                    })
 
-            time.sleep(POLL_SECONDS)
+                stations_out.append({"name": station_name, "routes": routes_out})
 
-    except KeyboardInterrupt:
-        print("\nStopping. Bye!")
+            now_str = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+            with _display_lock:
+                _display_data["stations"] = stations_out
+                _display_data["last_updated"] = now_str
+                _display_data["error"] = None
+
+        except Exception as e:
+            print(f"[ERROR] Fetch loop error: {e}", file=sys.stderr)
+            with _display_lock:
+                _display_data["error"] = str(e)
+
+        time.sleep(POLL_SECONDS)
+
+
+# --------- Entry point ---------
+
+def main():
+    """
+    Resolve station IDs once, then start the background fetch thread and the
+    Flask web server. The server blocks until the process is killed (Ctrl+C).
+    """
+    resolved_targets = []
+    for item in CONFIG:
+        station = item["station_name"]
+        routes = item["routes"]
+        parent_ids = find_station_parent_ids_for_routes(station, routes)
+        if not parent_ids:
+            print(f"[WARN] Could not find any parent stop ids for '{station}' (routes: {routes})")
+        resolved_targets.append({"station_name": station, "routes": routes, "parent_ids": parent_ids})
+
+    if all(len(t["parent_ids"]) == 0 for t in resolved_targets):  # every station failed to resolve
+        print("[FATAL] No stations resolved. Check station names or network connectivity.")
+        sys.exit(1)
+
+    print("Resolved stations:")
+    for t in resolved_targets:
+        print(f"  - {t['station_name']}: parents {t['parent_ids']} (routes: {', '.join(t['routes'])})")
+
+    # Start fetch loop as a daemon thread so it exits automatically when the main process does
+    fetch_thread = threading.Thread(target=_fetch_loop, args=(resolved_targets,), daemon=True)
+    fetch_thread.start()
+    print("Fetch thread started. Opening http://localhost:5000 …")
+
+    app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False)
 
 
 if __name__ == "__main__":

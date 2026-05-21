@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>MBTA Arrivals</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0d0d0d;
+      color: #f0f0f0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      padding: 2.5rem 3rem;
+      gap: 2rem;
+    }
+
+    /* ---- Header ---- */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      border-bottom: 1px solid #2a2a2a;
+      padding-bottom: 1.2rem;
+    }
+
+    header h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #ffffff;
+    }
+
+    #timestamp {
+      font-size: 1.1rem;
+      color: #555;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* ---- Station grid ---- */
+    .stations {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+      gap: 1.5rem;
+      flex: 1;
+    }
+
+    .station-card {
+      background: #161616;
+      border-radius: 14px;
+      padding: 1.8rem 2rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.4rem;
+    }
+
+    .station-name {
+      font-size: 2rem;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: 0.02em;
+    }
+
+    /* ---- Route block ---- */
+    .route {
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+    }
+
+    .route-label {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+    }
+
+    .route-dot {
+      width: 13px;
+      height: 13px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .route-name {
+      font-size: 0.95rem;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: #999;
+    }
+
+    /* ---- Arrival rows ---- */
+    .arrivals {
+      padding-left: 1.7rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.3rem;
+    }
+
+    .arrival {
+      display: flex;
+      align-items: baseline;
+      gap: 0.4rem;
+      line-height: 1.2;
+    }
+
+    .arrival-mins {
+      font-size: 2.8rem;
+      font-weight: 800;
+      color: #ffffff;
+      font-variant-numeric: tabular-nums;
+      min-width: 3.5rem;
+      text-align: right;
+    }
+
+    .arrival-unit {
+      font-size: 1rem;
+      color: #555;
+      margin-right: 0.4rem;
+    }
+
+    .arrival-headsign {
+      font-size: 1.25rem;
+      color: #aaa;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .no-predictions {
+      font-size: 1rem;
+      color: #444;
+      padding-left: 1.7rem;
+    }
+
+    /* ---- Footer ---- */
+    footer {
+      font-size: 0.85rem;
+      color: #333;
+      text-align: center;
+      padding-top: 0.5rem;
+    }
+
+    /* ---- Loading / error states ---- */
+    #loading {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.5rem;
+      color: #444;
+    }
+
+    .error-banner {
+      background: #2a0000;
+      color: #ff6666;
+      border-radius: 8px;
+      padding: 0.8rem 1.2rem;
+      font-size: 0.95rem;
+      margin-bottom: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>MBTA Arrivals</h1>
+    <div id="timestamp">Loading…</div>
+  </header>
+
+  <div id="error-banner" class="error-banner" style="display:none"></div>
+  <div id="loading">Fetching predictions…</div>
+  <div id="stations" class="stations" style="display:none"></div>
+
+  <footer id="footer"></footer>
+
+  <script>
+    const POLL_MS = 30_000;
+
+    function buildArrival(a) {
+      const headsign = a.headsign
+        ? `<span class="arrival-headsign">${a.headsign}</span>`
+        : '';
+      return `
+        <div class="arrival">
+          <span class="arrival-mins">${a.mins}</span>
+          <span class="arrival-unit">min</span>
+          ${headsign}
+        </div>`;
+    }
+
+    function buildRoute(route) {
+      const arrivals = route.arrivals.length
+        ? route.arrivals.map(buildArrival).join('')
+        : '<div class="no-predictions">No predictions</div>';
+      return `
+        <div class="route">
+          <div class="route-label">
+            <div class="route-dot" style="background:${route.color}"></div>
+            <span class="route-name">${route.name} Line</span>
+          </div>
+          <div class="arrivals">${arrivals}</div>
+        </div>`;
+    }
+
+    function buildStation(station) {
+      return `
+        <div class="station-card">
+          <div class="station-name">${station.name}</div>
+          ${station.routes.map(buildRoute).join('')}
+        </div>`;
+    }
+
+    async function refresh() {
+      let data;
+      try {
+        const res = await fetch('/data');
+        data = await res.json();
+      } catch (e) {
+        // Network or parse error — leave existing content in place, mark timestamp stale
+        document.getElementById('timestamp').textContent = 'Connection lost';
+        return;
+      }
+
+      // Show/hide error banner
+      const banner = document.getElementById('error-banner');
+      if (data.error) {
+        banner.textContent = `Error: ${data.error}`;
+        banner.style.display = '';
+      } else {
+        banner.style.display = 'none';
+      }
+
+      // Render stations
+      const stationsEl = document.getElementById('stations');
+      if (data.stations && data.stations.length) {
+        stationsEl.innerHTML = data.stations.map(buildStation).join('');
+        document.getElementById('loading').style.display = 'none';
+        stationsEl.style.display = '';
+      }
+
+      // Update timestamp and footer
+      const ts = data.last_updated || '—';
+      document.getElementById('timestamp').textContent = ts;
+      document.getElementById('footer').textContent = `Last updated ${ts}`;
+    }
+
+    // Initial fetch, then poll every 30 seconds
+    refresh();
+    setInterval(refresh, POLL_MS);
+  </script>
+
+</body>
+</html>
