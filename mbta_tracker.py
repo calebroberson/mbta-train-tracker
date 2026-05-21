@@ -36,7 +36,7 @@ CONFIG = [
 ]
 
 POLL_SECONDS = 30              # seconds between prediction refreshes
-MAX_PREDICTIONS_PER_BUCKET = 4  # max arrivals shown per route per station
+MAX_PREDICTIONS_PER_BUCKET = 8  # max arrivals shown per route per station
 HTTP_TIMEOUT = 15              # seconds before an API request is aborted
 
 ROUTE_COLORS = {
