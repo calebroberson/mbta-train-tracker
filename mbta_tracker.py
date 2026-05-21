@@ -21,6 +21,7 @@ if API_KEY:
     SESSION.headers.update({"x-api-key": API_KEY})  # attach once; all requests inherit it
 
 app = Flask(__name__)
+app.jinja_env.auto_reload = True
 
 
 # --------- Configuration ---------
