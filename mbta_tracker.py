@@ -27,10 +27,10 @@ app = Flask(__name__)
 # Add or remove stations here. Each entry specifies the display name and the
 # MBTA route IDs to track at that station.
 CONFIG = [
-    {"station_name": "Bowdoin",           "routes": ["Blue"]},
-    {"station_name": "Haymarket",         "routes": ["Orange"]},
-    {"station_name": "Park Street",       "routes": ["Red", "Green-B", "Green-C", "Green-D", "Green-E"]},
-    {"station_name": "Government Center", "routes": ["Green-B", "Green-C", "Green-D", "Green-E"]},
+    {"station_name": "Bowdoin",           "routes": ["Blue"],                                           "min_walk_mins": 2},
+    {"station_name": "Haymarket",         "routes": ["Orange"],                                         "min_walk_mins": 8},
+    {"station_name": "Park Street",       "routes": ["Red", "Green-B", "Green-C", "Green-D", "Green-E"], "min_walk_mins": 6},
+    {"station_name": "Government Center", "routes": ["Green-B", "Green-C", "Green-D", "Green-E"],       "min_walk_mins": 6},
 ]
 
 POLL_SECONDS = 30              # seconds between prediction refreshes
@@ -185,6 +185,7 @@ def _fetch_loop(resolved_targets: list):
                 station_name = t["station_name"]
                 parent_ids = t["parent_ids"]
                 routes = t["routes"]
+                min_walk_mins = t.get("min_walk_mins", 0)
                 if not parent_ids:
                     continue
 
@@ -233,8 +234,8 @@ def _fetch_loop(resolved_targets: list):
                 # Convert buckets to a JSON-serialisable list of route dicts
                 routes_out = []
                 for display_rid in [r for r in route_order if r in buckets]:  # preserve fixed display order
-                    # Deduplicate exact (mins, headsign) pairs, sort by time, then cap at N
-                    items = sorted(set(buckets[display_rid]), key=lambda x: x[0])[:MAX_PREDICTIONS_PER_BUCKET]
+                    # Deduplicate, drop trains reachable can't catch, sort by time, then cap at N
+                    items = sorted({p for p in buckets[display_rid] if p[0] > min_walk_mins}, key=lambda x: x[0])[:MAX_PREDICTIONS_PER_BUCKET]
                     routes_out.append({
                         "name": display_rid,
                         "color": ROUTE_COLORS.get(display_rid, "#888888"),
@@ -271,7 +272,7 @@ def main():
         parent_ids = find_station_parent_ids_for_routes(station, routes)
         if not parent_ids:
             print(f"[WARN] Could not find any parent stop ids for '{station}' (routes: {routes})")
-        resolved_targets.append({"station_name": station, "routes": routes, "parent_ids": parent_ids})
+        resolved_targets.append({"station_name": station, "routes": routes, "parent_ids": parent_ids, "min_walk_mins": item.get("min_walk_mins", 0)})
 
     if all(len(t["parent_ids"]) == 0 for t in resolved_targets):  # every station failed to resolve
         print("[FATAL] No stations resolved. Check station names or network connectivity.")
