@@ -30,7 +30,8 @@ app.jinja_env.auto_reload = True
 CONFIG = [
     {"station_name": "Bowdoin",           "routes": ["Blue"],                                           "min_walk_mins": 2},
     {"station_name": "Haymarket",         "routes": ["Orange"],                                         "min_walk_mins": 8},
-    {"station_name": "Park Street",       "routes": ["Red", "Green-B", "Green-C", "Green-D", "Green-E"], "min_walk_mins": 6},
+    {"station_name": "Park Street",       "display_name": "Park St · Red",   "routes": ["Red"],                                     "min_walk_mins": 6},
+    {"station_name": "Park Street",       "display_name": "Park St · Green", "routes": ["Green-B", "Green-C", "Green-D", "Green-E"], "min_walk_mins": 6},
     {"station_name": "Government Center", "routes": ["Green-B", "Green-C", "Green-D", "Green-E"],       "min_walk_mins": 6},
 ]
 
@@ -274,7 +275,8 @@ def main():
         parent_ids = find_station_parent_ids_for_routes(station, routes)
         if not parent_ids:
             print(f"[WARN] Could not find any parent stop ids for '{station}' (routes: {routes})")
-        resolved_targets.append({"station_name": station, "routes": routes, "parent_ids": parent_ids, "min_walk_mins": item.get("min_walk_mins", 0)})
+        display = item.get("display_name", station)  # fall back to station_name if no display_name
+        resolved_targets.append({"station_name": display, "routes": routes, "parent_ids": parent_ids, "min_walk_mins": item.get("min_walk_mins", 0)})
 
     if all(len(t["parent_ids"]) == 0 for t in resolved_targets):  # every station failed to resolve
         print("[FATAL] No stations resolved. Check station names or network connectivity.")
