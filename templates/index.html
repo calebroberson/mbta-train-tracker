@@ -34,9 +34,25 @@
       color: #ffffff;
     }
 
+    #header-right {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+
+    #status-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #444;
+      flex-shrink: 0;
+      transition: background 0.4s;
+    }
+
     #timestamp {
       font-size: 1.1rem;
-      color: #555;
+      font-weight: 700;
+      color: #cccccc;
       font-variant-numeric: tabular-nums;
     }
 
@@ -168,7 +184,10 @@
 
   <header>
     <h1>MBTA Arrivals</h1>
-    <div id="timestamp">Loading…</div>
+    <div id="header-right">
+      <span id="status-dot"></span>
+      <span id="timestamp">Loading…</span>
+    </div>
   </header>
 
   <div id="error-banner" class="error-banner" style="display:none"></div>
@@ -179,6 +198,11 @@
 
   <script>
     const POLL_MS = 30_000;
+    let lastGoodFetch = 0;
+
+    function setStatusDot(connected) {
+      document.getElementById('status-dot').style.background = connected ? '#22c55e' : '#ef4444';
+    }
 
     function buildArrival(a) {
       const headsign = a.headsign
@@ -220,8 +244,8 @@
         const res = await fetch('/data');
         data = await res.json();
       } catch (e) {
-        // Network or parse error — leave existing content in place, mark timestamp stale
         document.getElementById('timestamp').textContent = 'Connection lost';
+        setStatusDot(false);
         return;
       }
 
@@ -242,6 +266,10 @@
         stationsEl.style.display = '';
       }
 
+      // Mark connection healthy
+      lastGoodFetch = Date.now();
+      setStatusDot(true);
+
       // Update timestamp and footer
       const ts = data.last_updated || '—';
       document.getElementById('timestamp').textContent = ts;
@@ -251,6 +279,11 @@
     // Initial fetch, then poll every 30 seconds
     refresh();
     setInterval(refresh, POLL_MS);
+
+    // Turn dot red if no successful fetch in the last 35 seconds
+    setInterval(() => {
+      if (lastGoodFetch > 0 && Date.now() - lastGoodFetch > 35_000) setStatusDot(false);
+    }, 5_000);
   </script>
 
 </body>
