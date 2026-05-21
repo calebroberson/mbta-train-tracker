@@ -245,7 +245,7 @@ def _fetch_loop(resolved_targets: list):
                 stations_out.append({"name": station_name, "routes": routes_out})
 
             _now = datetime.now(TZ)
-            now_str = f"{_now.strftime('%B')} {_now.day}, {_now.year}"
+            now_str = f"{_now.strftime('%B')} {_now.day}, {_now.year}  {int(_now.strftime('%I'))}:{_now.strftime('%M %p %Z')}"
             with _display_lock:
                 _display_data["stations"] = stations_out
                 _display_data["last_updated"] = now_str
