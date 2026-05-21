@@ -30,7 +30,7 @@ FLASK_PID=$!
 sleep 4
 
 # Launch Chromium in kiosk mode (no address bar, no title bar, no error dialogs)
-chromium-browser \
+chromium \
     --kiosk \
     --noerrdialogs \
     --disable-infobars \
