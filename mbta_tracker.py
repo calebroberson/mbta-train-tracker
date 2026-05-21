@@ -30,8 +30,8 @@ app.jinja_env.auto_reload = True
 CONFIG = [
     {"station_name": "Bowdoin",           "routes": ["Blue"],                                           "min_walk_mins": 2},
     {"station_name": "Haymarket",         "routes": ["Orange"],                                         "min_walk_mins": 8},
-    {"station_name": "Park Street",       "display_name": "Park St · Red",   "routes": ["Red"],                                     "min_walk_mins": 6},
-    {"station_name": "Park Street",       "display_name": "Park St · Green", "routes": ["Green-B", "Green-C", "Green-D", "Green-E"], "min_walk_mins": 6},
+    {"station_name": "Park Street",       "routes": ["Red"],                                     "min_walk_mins": 6},
+    {"station_name": "Park Street",       "routes": ["Green-B", "Green-C", "Green-D", "Green-E"], "min_walk_mins": 6},
     {"station_name": "Government Center", "routes": ["Green-B", "Green-C", "Green-D", "Green-E"],       "min_walk_mins": 6},
 ]
 
