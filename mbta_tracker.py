@@ -128,7 +128,7 @@ def fetch_predictions(stop_id: str, route_ids: List[str]):
         "filter[stop]": stop_id,
         "filter[route]": ",".join(route_ids),  # comma-joined list batches multiple routes in one call
         "sort": "arrival_time,departure_time",  # soonest predictions first
-        "page[limit]": 10,  # small page keeps the payload light
+        "page[limit]": 100,  # enough headroom after per-station walk-time filtering
         "include": "trip",  # sideload trips so headsigns are available without a second request
         "fields[prediction]": "arrival_time,departure_time,direction_id,stop,trip,route",  # sparse fieldset
         "fields[trip]": "headsign",
