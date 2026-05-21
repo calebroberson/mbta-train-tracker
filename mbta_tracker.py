@@ -4,7 +4,7 @@ import sys  # stdlib for stderr printing / exit
 import time  # stdlib for sleep/backoff
 import requests  # HTTP client for MBTA API
 from datetime import datetime, timezone  # timezone-aware datetimes
-from typing import Dict, List, Optional, Tuple  # type hints
+from typing import Dict, List, Optional  # type hints
 import pytz  # local timezone conversion
 from dotenv import load_dotenv  # load .env file
 
@@ -22,17 +22,17 @@ if API_KEY:
 # --------- Configuration (what you asked for) ---------
 # We’ll search for the station by its public name, then filter predictions per route and direction.
 CONFIG = [
-    # Bowdoin — Blue line (outbound only)
-    {"station_name": "Bowdoin", "routes": ["Blue"], "directions": ["outbound"]},
+    # Bowdoin — Blue line
+    {"station_name": "Bowdoin", "routes": ["Blue"]},
 
-    # Haymarket — Orange line (both)
-    {"station_name": "Haymarket", "routes": ["Orange"], "directions": ["inbound", "outbound"]},
+    # Haymarket — Orange line
+    {"station_name": "Haymarket", "routes": ["Orange"]},
 
-    # Park Street — Red line (both) and Green line (both)
-    {"station_name": "Park Street", "routes": ["Red", "Green-B", "Green-C", "Green-D", "Green-E"], "directions": ["inbound", "outbound"]},
+    # Park Street — Red line and Green line
+    {"station_name": "Park Street", "routes": ["Red", "Green-B", "Green-C", "Green-D", "Green-E"]},
 
-    # Government Center — Green line (both)
-    {"station_name": "Government Center", "routes": ["Green-B", "Green-C", "Green-D", "Green-E"], "directions": ["inbound", "outbound"]},
+    # Government Center — Green line
+    {"station_name": "Government Center", "routes": ["Green-B", "Green-C", "Green-D", "Green-E"]},
 ]
 
 POLL_SECONDS = 30  # how often to poll MBTA in the main loop
@@ -92,55 +92,6 @@ def mbta_get(path: str, params: Dict) -> dict:
     return {"data": [], "included": []}
 
 
-def get_route_direction_map(route_id: str) -> Dict[str, int]:
-    """\
-    Return a mapping for a route's human directions to MBTA `direction_id` integers.
-
-    Many routes label directions as ["Outbound", "Inbound"] (index 0 and 1 respectively).
-    We normalize these into keys `"inbound"` and `"outbound"` so the rest of the code
-    can rely on semantic names regardless of route-specific labels.
-
-    Args:
-        route_id: MBTA route id (e.g., "Red", "Orange", "Green-D", "Blue").
-
-    Returns:
-        Dict like {"inbound": 1, "outbound": 0}. Values are integers 0/1.
-    """
-    # Cache per run to avoid repeated calls
-    if not hasattr(get_route_direction_map, "_cache"):
-        get_route_direction_map._cache = {}  # simple function attribute cache
-    cache = get_route_direction_map._cache  # local alias for brevity
-
-    if route_id in cache:
-        return cache[route_id]  # return cached mapping if available
-
-    data = mbta_get(f"/routes/{route_id}", params={"fields[route]": "direction_names"})  # fetch labels
-    direction_names = []  # default container
-    try:
-        direction_names = data["data"]["attributes"]["direction_names"]  # e.g., ["Outbound","Inbound"]
-    except Exception:
-        direction_names = ["Outbound", "Inbound"]  # sensible default when absent/broken
-
-    mapping = {}  # temp map of lowercase label -> index
-    # Build a normalized name->id map (lowercased)
-    for idx, name in enumerate(direction_names):
-        mapping[name.lower()] = idx  # remember position for each label
-
-    # Heuristic: expose conventional keys inbound/outbound even if labels are different
-    # If the route explicitly uses inbound/outbound, great. Otherwise we map by position.
-    result = {}  # final normalized mapping
-    if "inbound" in mapping and "outbound" in mapping:
-        result["inbound"] = mapping["inbound"]  # use explicit mapping
-        result["outbound"] = mapping["outbound"]  # use explicit mapping
-    else:
-        # Many MBTA heavy rail lines use [Outbound, Inbound]
-        # idx 0 -> outbound-ish, idx 1 -> inbound-ish
-        result["outbound"] = 0 if len(direction_names) > 0 else 0  # fallback index
-        result["inbound"] = 1 if len(direction_names) > 1 else 1  # fallback index
-
-    cache[route_id] = result  # memoize for subsequent calls
-    return result  # normalized mapping
-
 
 def find_station_parent_ids_for_routes(station_name: str, route_ids: List[str]) -> List[str]:
     """\
@@ -179,24 +130,6 @@ def find_station_parent_ids_for_routes(station_name: str, route_ids: List[str]) 
     return sorted(parent_ids)  # stable order for readability
 
 
-def iso_to_local_str(iso_str: str) -> str:
-    """\
-    Convert an ISO8601 UTC string (possibly ending with 'Z') to a local time string.
-
-    The output is formatted in the local Boston timezone and uses 12-hour clock
-    (platform-appropriate directive for Windows via `%#I`).
-
-    Args:
-        iso_str: ISO timestamp string like "2025-10-18T15:00:00Z".
-
-    Returns:
-        Local time string like "11:00:00 AM", or empty string on falsy input.
-    """
-    if not iso_str:
-        return ""  # guard for None/empty
-    dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))  # parse as aware UTC
-    return dt.astimezone(TZ).strftime("%#I:%M:%S %p")  # format for display
-
 
 def fetch_predictions(stop_id: str, route_ids: list[str]) -> List[dict]:
     """\
@@ -226,31 +159,6 @@ def fetch_predictions(stop_id: str, route_ids: list[str]) -> List[dict]:
     j = mbta_get("/predictions", params=params)  # perform the API call
     return j.get("data", []), j.get("included", [])  # safe extraction with defaults
 
-
-def summarize_prediction(p: dict, default_headsign: str = "") -> Tuple[Optional[int], str, int]:
-    """\
-    Reduce a raw prediction to (minutes_until, headsign, direction_id).
-
-    This helper extracts arrival/departure ISO times, converts to minutes until
-    arrival (floored to 0), and returns the headsign placeholder (caller may
-    replace with resolved trip headsign) plus the numeric direction id.
-
-    Args:
-        p: A single prediction record from MBTA API.
-        default_headsign: Fallback headsign if not resolved externally.
-
-    Returns:
-        Tuple: (minutes_until or None, headsign string, direction_id int).
-    """
-    attrs = p.get("attributes", {})  # prediction attributes
-    arr = attrs.get("arrival_time")  # ISO arrival time
-    dep = attrs.get("departure_time")  # ISO departure time
-    when_iso = arr or dep  # prefer arrival; fallback to departure
-    mins = minutes_until(when_iso) if when_iso else None  # compute minutes-until
-    dir_id = attrs.get("direction_id", -1)  # 0/1 when present, else -1
-
-    headsign = default_headsign  # (keep if you later wire in trip headsign)
-    return (mins, headsign, dir_id)  # compact summary tuple
 
 
 def minutes_until(iso_str: Optional[str], now: Optional[datetime] = None) -> Optional[int]:
@@ -292,18 +200,6 @@ def print_header(title: str):
     print("=" * 80)  # bottom divider
     
     
-def is_green_branch(route_id: str) -> bool:
-    """\
-    Return True if the provided route id is a Green branch (Green-B/C/D/E).
-
-    Args:
-        route_id: Route identifier string (e.g., "Green-D", "Red").
-
-    Returns:
-        True for Green branches, False otherwise.
-    """
-    return route_id.startswith("Green-")  # simple prefix check
-
 
 def main():
     """\
@@ -323,7 +219,6 @@ def main():
     for item in CONFIG:
         station = item["station_name"]  # human station name
         routes = item["routes"]  # routes to consider for that station
-        dirs = item["directions"]  # preserved (may be unused in current print mode)
 
         parent_ids = find_station_parent_ids_for_routes(station, routes)  # place ids
         if not parent_ids:
@@ -331,7 +226,6 @@ def main():
         resolved_targets.append({
             "station_name": station,
             "routes": routes,
-            "directions": dirs,
             "parent_ids": parent_ids
         })  # accumulate target config+ids
 
