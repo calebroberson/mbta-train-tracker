@@ -1,320 +1,249 @@
 #!/usr/bin/env python3
-import os  # stdlib for env vars / paths
-import sys  # stdlib for stderr printing / exit
-import time  # stdlib for sleep/backoff
-import requests  # HTTP client for MBTA API
-from datetime import datetime, timezone  # timezone-aware datetimes
-from typing import Dict, List, Optional  # type hints
-import pytz  # local timezone conversion
-from dotenv import load_dotenv  # load .env file
+import os
+import sys
+import time
+import requests
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
+import pytz
+from dotenv import load_dotenv
 
-load_dotenv()  # reads the .env file and sets environment variables on process start
+load_dotenv()  # must run before any os.getenv call
 
-MBTA_API_BASE = "https://api-v3.mbta.com"  # base URL for MBTA v3 API
-API_KEY = os.getenv("MBTA_API_KEY")  # optional but recommended; improves rate limits
-TZ = pytz.timezone("America/New_York")  # local display timezone for Boston area
+MBTA_API_BASE = "https://api-v3.mbta.com"
+API_KEY = os.getenv("MBTA_API_KEY")  # optional, but raises rate limits when provided
+TZ = pytz.timezone("America/New_York")
 
 SESSION = requests.Session()  # reuse TCP connection across requests
 if API_KEY:
-    SESSION.headers.update({"x-api-key": API_KEY})  # attach API key header once up front
+    SESSION.headers.update({"x-api-key": API_KEY})  # attach once; all requests inherit it
 
 
-# --------- Configuration (what you asked for) ---------
-# We’ll search for the station by its public name, then filter predictions per route and direction.
+# --------- Configuration ---------
+# Add or remove stations here. Each entry specifies the display name and the
+# MBTA route IDs to track at that station.
 CONFIG = [
-    # Bowdoin — Blue line
-    {"station_name": "Bowdoin", "routes": ["Blue"]},
-
-    # Haymarket — Orange line
-    {"station_name": "Haymarket", "routes": ["Orange"]},
-
-    # Park Street — Red line and Green line
-    {"station_name": "Park Street", "routes": ["Red", "Green-B", "Green-C", "Green-D", "Green-E"]},
-
-    # Government Center — Green line
+    {"station_name": "Bowdoin",           "routes": ["Blue"]},
+    {"station_name": "Haymarket",         "routes": ["Orange"]},
+    {"station_name": "Park Street",       "routes": ["Red", "Green-B", "Green-C", "Green-D", "Green-E"]},
     {"station_name": "Government Center", "routes": ["Green-B", "Green-C", "Green-D", "Green-E"]},
 ]
 
-POLL_SECONDS = 30  # how often to poll MBTA in the main loop
-MAX_PREDICTIONS_PER_BUCKET = 5  # show top N per (station, route) after sorting
-HTTP_TIMEOUT = 15  # seconds; network timeout per HTTP call
+POLL_SECONDS = 30              # seconds between prediction refreshes
+MAX_PREDICTIONS_PER_BUCKET = 5  # max arrivals shown per route per station
+HTTP_TIMEOUT = 15              # seconds before an API request is aborted
 
 
-# --------- Helper functions ---------
+# --------- API helpers ---------
+
 def mbta_get(path: str, params: Dict) -> dict:
-    """\
-    Perform a GET against the MBTA API with basic error handling and retry logic.
-
-    - Honors 429 responses with `Retry-After` if present; otherwise short backoff.
-    - Retries network errors up to 3 total attempts.
-    - Returns a JSON dict with at least `data`/`included` keys on error fallback.
-
-    Args:
-        path: API path beginning with `/`, e.g. `/predictions`.
-        params: Querystring parameters to include in the request.
-
-    Returns:
-        Parsed JSON dict from the response, or a minimal fallback on failure.
     """
-    url = f"{MBTA_API_BASE}{path}"  # assemble full URL
+    GET an MBTA API endpoint, retrying up to 3 times on failure.
 
-    for attempt in range(3):  # Up to 3 total tries
+    Respects Retry-After on 429 responses. Returns a dict with empty 'data'
+    and 'included' lists on unrecoverable failure so callers can always
+    iterate the result without an extra None check.
+    """
+    url = f"{MBTA_API_BASE}{path}"
+
+    for attempt in range(3):
         try:
-            r = SESSION.get(url, params=params, timeout=HTTP_TIMEOUT)  # single HTTP GET
+            r = SESSION.get(url, params=params, timeout=HTTP_TIMEOUT)
 
-            # If server says "Too Many Requests"
             if r.status_code == 429:
-                # Respect Retry-After if MBTA provides it
-                retry_after = r.headers.get("Retry-After")  # may be a number of seconds
-                if retry_after:
-                    wait = int(retry_after)  # use server-provided delay
-                else:
-                    wait = 1  # default small backoff if header absent
+                retry_after = r.headers.get("Retry-After")
+                wait = int(retry_after) if retry_after else 1  # honour server hint or fall back to 1s
                 print(f"[WARN] 429 Too Many Requests. Waiting {wait}s before retry...")
-                time.sleep(wait)  # pause before retrying
-                continue  # retry
+                time.sleep(wait)
+                continue
 
-            # If another HTTP error (like 500, 404, etc), raise it
-            r.raise_for_status()  # will throw for non-2xx status codes
-
-            # Success!
-            return r.json()  # parsed JSON payload
+            r.raise_for_status()  # raise for any other non-2xx status
+            return r.json()
 
         except requests.RequestException as e:
-            # If it's a network error or other issue
-            if attempt == 2:  # last attempt; give up gracefully
+            if attempt == 2:  # all retries exhausted
                 print(f"[ERROR] Request failed after retries: {e}", file=sys.stderr)
-                return {"data": [], "included": []}  # consistent shape for callers
+                return {"data": [], "included": []}
             print(f"[WARN] Request error: {e}. Retrying in 1s...")
-            time.sleep(1)  # small generic backoff before next attempt
+            time.sleep(1)
 
-    # Fallback (just in case) — defensive; loop should already have returned
-    return {"data": [], "included": []}
-
+    return {"data": [], "included": []}  # unreachable in practice; satisfies the type checker
 
 
 def find_station_parent_ids_for_routes(station_name: str, route_ids: List[str]) -> List[str]:
-    """\
-    Resolve a station's MBTA parent place IDs for any of the provided route IDs.
-
-    The MBTA API exposes child platform stops and their parent "place-*" ids.
-    We look up all stops for each route and select those whose stop name matches
-    the provided station name, then return their parent ids (or stop id if no parent).
-
-    Args:
-        station_name: Public-facing stop name (e.g., "Park Street").
-        route_ids: List of route ids to search (e.g., ["Red", "Green-D"]).
-
-    Returns:
-        Sorted list of unique parent place ids (e.g., ["place-pktrm"]).
     """
-    parent_ids = set()  # de-duplicate across routes
+    Resolve a station name to its MBTA parent place ID(s).
+
+    Each station has a parent 'place-*' ID that groups all its platforms. We
+    fetch stops for each route, match by name, and collect parent IDs (falling
+    back to the stop ID itself when no parent is set).
+    """
+    parent_ids = set()  # set deduplicates IDs that appear across multiple routes
     for rid in route_ids:
-        # Pull stops for this route, then match those whose name matches the station.
-        # We request a generous page limit to capture all child stops/platforms.
         stops = mbta_get(
             "/stops",
             params={
                 "filter[route]": rid,
-                "page[limit]": 200,
-                "fields[stop]": "name,parent_station"
+                "page[limit]": 200,  # generous limit to capture all platforms
+                "fields[stop]": "name,parent_station",
             },
-        ).get("data", [])  # extract list safely
+        ).get("data", [])
 
         for s in stops:
-            attrs = s.get("attributes", {})  # stop attributes
-            name = attrs.get("name", "")  # public stop name
-            parent = attrs.get("parent_station")  # parent place id or None
-            if name.lower() == station_name.lower():  # case-insensitive match
-                parent_ids.add(parent if parent else s.get("id"))  # prefer parent id if present
-    return sorted(parent_ids)  # stable order for readability
+            attrs = s.get("attributes", {})
+            name = attrs.get("name", "")
+            parent = attrs.get("parent_station")  # None for top-level place stops
+            if name.lower() == station_name.lower():
+                parent_ids.add(parent if parent else s.get("id"))  # prefer parent when present
+
+    return sorted(parent_ids)  # sorted for a stable, predictable order
 
 
+def fetch_predictions(stop_id: str, route_ids: List[str]):
+    """
+    Fetch live predictions for a parent stop, batching all routes in one request.
 
-def fetch_predictions(stop_id: str, route_ids: list[str]) -> List[dict]:
-    """\
-    Fetch prediction entities for a single parent stop and multiple routes (batched).
-
-    We call `/predictions` once with a comma-joined list of route ids and include
-    `trip` entities so we can access headsigns for destination display.
-
-    Args:
-        stop_id: Parent place id like "place-pktrm".
-        route_ids: List of route ids to include in one batched request.
-
-    Returns:
-        Tuple of (data, included):
-          - data: list of prediction records
-          - included: list of related entities (e.g., trips with headsigns)
+    Includes trip entities so headsigns (destination names) are available in
+    the same response. Returns (data, included) where data is a list of
+    prediction records and included is a list of related trip entities.
     """
     params = {
-        "filter[stop]": stop_id,  # restrict to the target station/place
-        "filter[route]": ",".join(route_ids),  # batch multiple routes together
-        "sort": "arrival_time,departure_time",  # soonest first
-        "page[limit]": 10,  # we only need a handful; keeps payload small
-        "include": "trip",  # include trip info so we can show headsigns
-        "fields[prediction]": "arrival_time,departure_time,direction_id,stop,trip,route",  # slim payload
-        "fields[trip]": "headsign",  # only need headsign from trip
+        "filter[stop]": stop_id,
+        "filter[route]": ",".join(route_ids),  # comma-joined list batches multiple routes in one call
+        "sort": "arrival_time,departure_time",  # soonest predictions first
+        "page[limit]": 10,  # small page keeps the payload light
+        "include": "trip",  # sideload trips so headsigns are available without a second request
+        "fields[prediction]": "arrival_time,departure_time,direction_id,stop,trip,route",  # sparse fieldset
+        "fields[trip]": "headsign",
     }
-    j = mbta_get("/predictions", params=params)  # perform the API call
-    return j.get("data", []), j.get("included", [])  # safe extraction with defaults
-
+    j = mbta_get("/predictions", params=params)
+    return j.get("data", []), j.get("included", [])
 
 
 def minutes_until(iso_str: Optional[str], now: Optional[datetime] = None) -> Optional[int]:
-    """\
-    Compute whole minutes from `now` to the future ISO8601 timestamp (UTC-based).
+    """
+    Return whole minutes from now until the given ISO 8601 timestamp.
 
-    - Treats inputs as UTC (replacing trailing 'Z' when present).
-    - Floors to 0 for past or near-past arrivals (never negative).
-    - Returns None when the input is falsy or cannot be parsed.
-
-    Args:
-        iso_str: ISO timestamp string or None.
-        now: Optional override for the current moment (useful in tests).
-
-    Returns:
-        Non-negative integer minutes until, or None if unparsable.
+    Clamps to 0 for past arrivals. Returns None on falsy or unparsable input.
+    The optional 'now' parameter exists for test injection.
     """
     if not iso_str:
-        return None  # no timestamp provided
+        return None
     try:
-        target = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))  # parse aware UTC
-        now = now or datetime.now(timezone.utc)  # default to current UTC time
-        delta_sec = (target - now).total_seconds()  # difference in seconds
-        mins = int(delta_sec // 60)  # floor to whole minutes
-        return max(0, mins)  # clamp negatives to 0
+        target = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))  # normalise trailing 'Z' to a UTC offset
+        now = now or datetime.now(timezone.utc)
+        delta_sec = (target - now).total_seconds()
+        return max(0, int(delta_sec // 60))  # floor to whole minutes; clamp negatives to 0
     except Exception:
-        return None  # graceful failure on bad input
+        return None
 
 
 def print_header(title: str):
-    """\
-    Print a simple banner header around the provided title.
+    print("\n" + "=" * 80)
+    print(title)
+    print("=" * 80)
 
-    Args:
-        title: The string to center between divider lines.
-    """
-    print("\n" + "=" * 80)  # top divider
-    print(title)  # the banner title text
-    print("=" * 80)  # bottom divider
-    
-    
+
+# --------- Main loop ---------
 
 def main():
-    """\
-    Resolve station -> parent ids, poll predictions, and print grouped results.
-
-    Behavior:
-      - Resolves parent place ids for each configured station+routes.
-      - In a loop, fetches predictions batched per station (all routes at once).
-      - Groups all Green branches under a single "Green" display route.
-      - Prints, per station, each route's next N arrivals in minutes with headsigns.
-
-    Note:
-      - The function runs indefinitely until KeyboardInterrupt (Ctrl+C).
     """
-    # Resolve station parent ids per configuration (one-time)
-    resolved_targets = []  # list of dicts with: station_name, route_ids, directions, parent_ids
-    for item in CONFIG:
-        station = item["station_name"]  # human station name
-        routes = item["routes"]  # routes to consider for that station
+    One-time setup followed by an infinite poll loop.
 
-        parent_ids = find_station_parent_ids_for_routes(station, routes)  # place ids
+    On startup, station names are resolved to MBTA parent place IDs. Then every
+    POLL_SECONDS, predictions are fetched for each station, grouped by route, and
+    printed. Green branches (B/C/D/E) are collapsed into a single 'Green' row
+    with the branch letter appended to each headsign. Runs until Ctrl+C.
+    """
+    # Resolve station names to parent place IDs once at startup
+    resolved_targets = []
+    for item in CONFIG:
+        station = item["station_name"]
+        routes = item["routes"]
+        parent_ids = find_station_parent_ids_for_routes(station, routes)
         if not parent_ids:
             print(f"[WARN] Could not find any parent stop ids for '{station}' (routes: {routes})")
-        resolved_targets.append({
-            "station_name": station,
-            "routes": routes,
-            "parent_ids": parent_ids
-        })  # accumulate target config+ids
+        resolved_targets.append({"station_name": station, "routes": routes, "parent_ids": parent_ids})
 
-    if all(len(t["parent_ids"]) == 0 for t in resolved_targets):
-        print("[FATAL] No stations resolved. Check station names or network connectivity.")  # hard stop
-        sys.exit(1)  # exit with failure
+    if all(len(t["parent_ids"]) == 0 for t in resolved_targets):  # every station failed to resolve
+        print("[FATAL] No stations resolved. Check station names or network connectivity.")
+        sys.exit(1)
 
-    print("Resolved stations:")  # debug listing for visibility
+    print("Resolved stations:")
     for t in resolved_targets:
         print(f"  - {t['station_name']}: parents {t['parent_ids']} (routes: {', '.join(t['routes'])})")
-    print("\nStarting live polling… Press Ctrl+C to stop.")  # indicate loop start
+    print("\nStarting live polling… Press Ctrl+C to stop.")
 
     try:
-        while True:  # continuous polling loop
-            now_local = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S %Z")  # timestamp label
-            print_header(f"MBTA Live Predictions @ {now_local}")  # cycle header
+        while True:
+            now_local = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+            print_header(f"MBTA Live Predictions @ {now_local}")
 
-            # Stable display order; Green branches are grouped under "Green"
-            route_order = ["Blue", "Orange", "Red", "Green"]  # fixed presentation order
+            route_order = ["Blue", "Orange", "Red", "Green"]  # fixed display order across all stations
 
             for t in resolved_targets:
-                station = t["station_name"]  # name to print
-                parent_ids = t["parent_ids"]  # list of place ids
-                routes = t["routes"]  # routes to include for this station
+                station = t["station_name"]
+                parent_ids = t["parent_ids"]
+                routes = t["routes"]
                 if not parent_ids:
-                    continue  # skip stations we couldn't resolve
+                    continue
 
-                # ---- Gather all predictions across all parent_ids for this station ----
-                # buckets: display_route_id -> list[(mins, headsign)]
-                buckets: Dict[str, list] = {}  # route -> list of (minutes, headsign)
+                # Accumulate (minutes, headsign) pairs keyed by display route name.
+                # A station can have multiple parent IDs (e.g. separate platforms),
+                # so we loop over all of them and merge into the same buckets.
+                buckets: Dict[str, list] = {}
 
                 for pid in parent_ids:
-                    # One batched predictions call per station/place id
-                    preds, included = fetch_predictions(pid, routes)  # returns (data, included)
+                    preds, included = fetch_predictions(pid, routes)
 
-                    # Map trip_id -> headsign (if included)
-                    trip_headsign: Dict[str, str] = {}  # lookup for destination text
-                    for inc in included or []:
+                    # Build a trip_id -> headsign lookup from the sideloaded trip entities
+                    trip_headsign: Dict[str, str] = {}
+                    for inc in included or []:  # 'included' can be None when no trips are sideloaded
                         if inc.get("type") == "trip":
-                            trip_headsign[inc["id"]] = inc.get("attributes", {}).get("headsign", "")  # may be ""
+                            trip_headsign[inc["id"]] = inc.get("attributes", {}).get("headsign", "")
 
-                    # Partition predictions locally by route & direction
                     for p in preds or []:
-                        attrs = p.get("attributes", {})  # prediction attributes
-                        rel = p.get("relationships", {})  # relationships bag
+                        attrs = p.get("attributes", {})
+                        rel = p.get("relationships", {})
 
-                        rid = rel.get("route", {}).get("data", {}).get("id")   # e.g. "Green-D" or "Red"
-                        iso = attrs.get("arrival_time") or attrs.get("departure_time")  # when to use
+                        # Navigate the JSON:API relationship chain to reach the route ID string
+                        rid = rel.get("route", {}).get("data", {}).get("id")
+                        iso = attrs.get("arrival_time") or attrs.get("departure_time")  # prefer arrival time
                         if not rid or not iso:
-                            continue  # skip incomplete predictions
+                            continue
 
-                        mins = minutes_until(iso)  # compute minutes until arrival/departure
+                        mins = minutes_until(iso)
                         if mins is None:
-                            continue  # drop unparsable values
+                            continue
 
-                        # Group all Green branches under a single "Green" display route
-                        display_rid = "Green" if rid.startswith("Green-") else rid  # collapse branches
+                        display_rid = "Green" if rid.startswith("Green-") else rid  # collapse all branches into one row
 
-                        # Head-sign, optionally append branch letter for Green
-                        trip_id = rel.get("trip", {}).get("data", {}).get("id")  # trip relation id
-                        hs = trip_headsign.get(trip_id, "")  # destination text if available
+                        trip_id = rel.get("trip", {}).get("data", {}).get("id")
+                        hs = trip_headsign.get(trip_id, "")
                         if rid.startswith("Green-"):
                             try:
-                                branch = rid.split("-")[1]  # B/C/D/E
-                                if hs and f"({branch})" not in hs:
-                                    hs = f"{hs} ({branch})"  # make branch explicit for clarity
+                                branch = rid.split("-")[1]  # extract letter from e.g. "Green-B" -> "B"
+                                if hs and f"({branch})" not in hs:  # guard against double-appending
+                                    hs = f"{hs} ({branch})"
                             except Exception:
-                                pass  # be resilient if route id is malformed
+                                pass
 
-                        buckets.setdefault(display_rid, []).append((mins, hs))  # append to route bucket
+                        buckets.setdefault(display_rid, []).append((mins, hs))
 
-                # ---- Print one block per station, then per route (no direction split) ----
-                print(station)  # station header
-
-                for display_rid in [r for r in route_order if r in buckets]:
-                    # Sort by minutes, dedupe exact duplicates, then take top N
-                    items = sorted(set(buckets[display_rid]), key=lambda x: x[0])[:MAX_PREDICTIONS_PER_BUCKET]  # trim
-
-                    # Route subheader with "Line"
-                    print(f"  {display_rid} Line")  # e.g., "Red Line", "Green Line"
+                print(station)
+                for display_rid in [r for r in route_order if r in buckets]:  # filter to present routes, preserving order
+                    # Deduplicate exact (mins, headsign) pairs, sort by time, then cap at N
+                    items = sorted(set(buckets[display_rid]), key=lambda x: x[0])[:MAX_PREDICTIONS_PER_BUCKET]
+                    print(f"  {display_rid} Line")
                     for mins, hs in items:
-                        suffix = f" — {hs}" if hs else ""  # include headsign when present
-                        print(f"    • {mins} min{suffix}")  # bullet list item
+                        suffix = f" — {hs}" if hs else ""
+                        print(f"    • {mins} min{suffix}")
 
-            # Sleep until next poll
-            time.sleep(POLL_SECONDS)  # pacing for the outer loop
+            time.sleep(POLL_SECONDS)
+
     except KeyboardInterrupt:
-        print("\nStopping. Bye!")  # graceful exit on Ctrl+C
+        print("\nStopping. Bye!")
 
 
 if __name__ == "__main__":
-    main()  # entry point
+    main()
