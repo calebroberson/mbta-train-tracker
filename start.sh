@@ -16,6 +16,16 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Log all output so we can diagnose autostart failures
+exec >> "$SCRIPT_DIR/startup.log" 2>&1
+echo "--- start.sh launched at $(date) ---"
+
+# Ensure the X display is set (autostart doesn't always inherit it)
+export DISPLAY=:0
+
+# Give the desktop session a moment to fully initialise before touching the display
+sleep 5
+
 # Disable screen blanking and power management for an always-on display
 # (|| true prevents set -e from aborting if xset isn't supported)
 xset s off     || true
