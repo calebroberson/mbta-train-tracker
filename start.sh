@@ -17,9 +17,10 @@ SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Disable screen blanking and power management for an always-on display
-xset s off
-xset -dpms
-xset s noblank
+# (|| true prevents set -e from aborting if xset isn't supported)
+xset s off     || true
+xset -dpms     || true
+xset s noblank || true
 
 # Activate the virtual environment and start Flask in the background
 source venv/bin/activate
