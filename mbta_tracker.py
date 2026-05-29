@@ -188,6 +188,7 @@ def _fetch_loop(resolved_targets: list):
                 parent_ids = t["parent_ids"]
                 routes = t["routes"]
                 min_walk_mins = t.get("min_walk_mins", 0)
+                filter_name = t.get("filter_name", station_name)  # canonical MBTA name for headsign comparison
                 if not parent_ids:
                     continue
 
@@ -223,6 +224,8 @@ def _fetch_loop(resolved_targets: list):
 
                         trip_id = rel.get("trip", {}).get("data", {}).get("id")
                         hs = trip_headsign.get(trip_id, "")
+                        if hs and hs.lower() == filter_name.lower():
+                            continue  # train terminates at this station; can't board it
                         if rid.startswith("Green-"):
                             try:
                                 branch = rid.split("-")[1]  # extract letter from e.g. "Green-B" -> "B"
@@ -276,7 +279,7 @@ def main():
         if not parent_ids:
             print(f"[WARN] Could not find any parent stop ids for '{station}' (routes: {routes})")
         display = item.get("display_name", station)  # fall back to station_name if no display_name
-        resolved_targets.append({"station_name": display, "routes": routes, "parent_ids": parent_ids, "min_walk_mins": item.get("min_walk_mins", 0)})
+        resolved_targets.append({"station_name": display, "filter_name": station, "routes": routes, "parent_ids": parent_ids, "min_walk_mins": item.get("min_walk_mins", 0)})
 
     if all(len(t["parent_ids"]) == 0 for t in resolved_targets):  # every station failed to resolve
         print("[FATAL] No stations resolved. Check station names or network connectivity.")

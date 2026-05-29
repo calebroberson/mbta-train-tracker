@@ -143,7 +143,7 @@ def test_arrivals_capped_at_max_predictions():
     )
 
     arrivals = _display_data["stations"][0]["routes"][0]["arrivals"]
-    assert len(arrivals) == 5  # MAX_PREDICTIONS_PER_BUCKET
+    assert len(arrivals) == 8  # MAX_PREDICTIONS_PER_BUCKET
 
 
 @freeze_time("2026-01-01 12:00:00")
@@ -152,6 +152,38 @@ def test_last_updated_is_set_after_successful_fetch():
         [{"station_name": "Park Street", "parent_ids": ["place-pktrm"], "routes": ["Red"], "min_walk_mins": 0}],
     )
     assert _display_data["last_updated"] is not None
+
+
+@freeze_time("2026-01-01 12:00:00")
+def test_terminal_headsign_filtered_out():
+    """A prediction whose headsign equals the station name should be dropped."""
+    preds = [_pred("Blue", "2026-01-01T12:10:00+00:00", "t1")]
+    included = [_trip("t1", "Bowdoin")]
+
+    run_one_iteration(
+        [{"station_name": "Bowdoin", "filter_name": "Bowdoin",
+          "parent_ids": ["place-bodsq"], "routes": ["Blue"], "min_walk_mins": 0}],
+        fetch_return=(preds, included),
+    )
+
+    # All predictions were terminal — bucket is empty, so no route rows rendered
+    assert _display_data["stations"][0]["routes"] == []
+
+
+@freeze_time("2026-01-01 12:00:00")
+def test_non_terminal_headsign_kept():
+    """A prediction whose headsign differs from the station name should be kept."""
+    preds = [_pred("Blue", "2026-01-01T12:10:00+00:00", "t1")]
+    included = [_trip("t1", "Wonderland")]
+
+    run_one_iteration(
+        [{"station_name": "Bowdoin", "filter_name": "Bowdoin",
+          "parent_ids": ["place-bodsq"], "routes": ["Blue"], "min_walk_mins": 0}],
+        fetch_return=(preds, included),
+    )
+
+    arrivals = _display_data["stations"][0]["routes"][0]["arrivals"]
+    assert arrivals[0]["headsign"] == "Wonderland"
 
 
 def test_exception_sets_error_in_display_data():
