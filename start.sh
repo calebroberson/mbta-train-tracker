@@ -46,17 +46,25 @@ FLASK_PID=$!
 # Give Flask a moment to bind its port before opening the browser
 sleep 4
 
-# Launch Chromium in kiosk mode (no address bar, no title bar, no error dialogs)
-chromium \
-    --kiosk \
-    --password-store=basic \
-    --noerrdialogs \
-    --disable-infobars \
-    --disable-session-crashed-bubble \
-    --disable-restore-session-state \
-    --no-first-run \
-    --incognito \
-    http://localhost:5000
+# Kill Flask whenever this script exits for any reason (crash, signal, etc.)
+trap 'kill "$FLASK_PID" 2>/dev/null || true' EXIT
 
-# If Chromium exits (e.g. user closes it), shut down the Flask server too
-kill "$FLASK_PID" 2>/dev/null || true
+# Launch Chromium in a restart loop.
+# On Raspberry Pi, Chromium occasionally crashes with a "Broken pipe" display error.
+# The loop recovers automatically so the kiosk never goes permanently blank.
+# --disable-gpu disables hardware acceleration, which prevents the most common Pi GPU crash.
+while true; do
+    chromium \
+        --kiosk \
+        --password-store=basic \
+        --noerrdialogs \
+        --disable-infobars \
+        --disable-session-crashed-bubble \
+        --disable-restore-session-state \
+        --no-first-run \
+        --incognito \
+        --disable-gpu \
+        http://localhost:5000 || true
+    echo "[$(date)] Chromium exited — restarting in 5s…"
+    sleep 5
+done
