@@ -52,6 +52,9 @@ ROUTE_COLORS = {
 _display_lock = threading.Lock()
 _display_data: dict = {"stations": [], "last_updated": None, "error": None}
 
+# Populated once by main(); read by the /debug route.
+_resolved_targets: list = []
+
 
 # --------- API helpers ---------
 
@@ -170,6 +173,75 @@ def data():
         return jsonify(_display_data)
 
 
+@app.route("/debug")
+def debug():
+    """
+    Diagnostic endpoint — fetches fresh predictions for every configured station
+    and shows each raw prediction alongside the filter decision that would apply to it.
+
+    Visit http://mbta-tracker.local:5000/debug to investigate missing trains.
+    """
+    output = []
+    for t in _resolved_targets:
+        station_name = t["station_name"]
+        filter_name = t.get("filter_name", station_name)
+        min_walk_mins = t.get("min_walk_mins", 0)
+        station_info = {
+            "station": station_name,
+            "filter_name": filter_name,
+            "parent_ids": t["parent_ids"],
+            "routes": t["routes"],
+            "min_walk_mins": min_walk_mins,
+            "raw_predictions": [],
+        }
+
+        for pid in t["parent_ids"]:
+            preds, included = fetch_predictions(pid, t["routes"])
+
+            trip_headsign: Dict[str, str] = {}
+            for inc in included or []:
+                if inc.get("type") == "trip":
+                    trip_headsign[inc["id"]] = inc.get("attributes", {}).get("headsign", "")
+
+            for p in preds or []:
+                attrs = p.get("attributes", {})
+                rel = p.get("relationships", {})
+                rid = rel.get("route", {}).get("data", {}).get("id")
+                arrival_iso = attrs.get("arrival_time")
+                departure_iso = attrs.get("departure_time")
+                iso = arrival_iso or departure_iso
+                direction_id = attrs.get("direction_id")
+                trip_id = rel.get("trip", {}).get("data", {}).get("id")
+                hs = trip_headsign.get(trip_id, "")
+                mins = minutes_until(iso)
+
+                if not iso:
+                    decision = "skipped: no arrival_time or departure_time"
+                elif mins is None:
+                    decision = "skipped: could not parse timestamp"
+                elif hs and hs.lower() == filter_name.lower():
+                    decision = f"filtered: terminal train (headsign '{hs}' == filter_name '{filter_name}')"
+                elif mins <= min_walk_mins:
+                    decision = f"filtered: walk_time (mins={mins} <= min_walk_mins={min_walk_mins})"
+                else:
+                    decision = "shown"
+
+                station_info["raw_predictions"].append({
+                    "parent_stop": pid,
+                    "route_id": rid,
+                    "direction_id": direction_id,
+                    "headsign": hs,
+                    "arrival_time": arrival_iso,
+                    "departure_time": departure_iso,
+                    "mins_until": mins,
+                    "decision": decision,
+                })
+
+        output.append(station_info)
+
+    return jsonify(output)
+
+
 # --------- Fetch loop ---------
 
 def _fetch_loop(resolved_targets: list):
@@ -271,6 +343,7 @@ def main():
     Resolve station IDs once, then start the background fetch thread and the
     Flask web server. The server blocks until the process is killed (Ctrl+C).
     """
+    global _resolved_targets
     resolved_targets = []
     for item in CONFIG:
         station = item["station_name"]
@@ -281,6 +354,7 @@ def main():
         display = item.get("display_name", station)  # fall back to station_name if no display_name
         resolved_targets.append({"station_name": display, "filter_name": station, "routes": routes, "parent_ids": parent_ids, "min_walk_mins": item.get("min_walk_mins", 0)})
 
+    _resolved_targets = resolved_targets  # expose to /debug route
     if all(len(t["parent_ids"]) == 0 for t in resolved_targets):  # every station failed to resolve
         print("[FATAL] No stations resolved. Check station names or network connectivity.")
         sys.exit(1)

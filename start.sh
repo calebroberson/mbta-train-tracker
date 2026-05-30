@@ -32,6 +32,12 @@ xset s off     || true
 xset -dpms     || true
 xset s noblank || true
 
+# Hide the mouse cursor — it has no mouse attached and the frozen cursor is distracting.
+# unclutter watches the X pointer and replaces it with a blank cursor after N idle seconds.
+# -idle 0  = hide immediately (don't wait for any idle time)
+# -root    = also hide when the pointer is over the root/desktop window
+unclutter -idle 0 -root &
+
 # Activate the virtual environment and start Flask in the background
 source venv/bin/activate
 python mbta_tracker.py &
