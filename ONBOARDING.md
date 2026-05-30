@@ -267,6 +267,28 @@ Useful for diagnosing autostart failures:
 tail -50 ~/mbta-train-tracker/startup.log
 ```
 
+### Hiding the Mouse Cursor
+
+The kiosk has no mouse attached, so an idle pointer arrow would otherwise sit frozen on screen. Hiding it is **not** done in `start.sh` or in CSS — those approaches are X11-era and **silently do nothing** on this Pi.
+
+**Why:** Raspberry Pi OS Trixie runs the **labwc Wayland compositor**, not X11. `unclutter`, `xset`, the CSS `cursor: none` rule, and the lightdm `xserver-command=X -nocursor` option all assume X11 and have no effect under Wayland. (You can confirm the compositor with `pgrep -a labwc` and the session with `echo $XDG_SESSION_TYPE` from inside the graphical session.)
+
+**The fix** is a fully **transparent `XCURSOR` theme**, which both labwc and Xwayland honor — the cursor bitmap becomes invisible no matter which layer draws it. This is a one-time, per-Pi setup (it lives in the home directory, not the repo), so it must be re-run after reimaging the Pi:
+
+```bash
+cd ~/mbta-train-tracker
+bash scripts/hide-cursor.sh
+sudo reboot
+```
+
+`scripts/hide-cursor.sh` is idempotent. It:
+1. Installs `xcursorgen` (provided by the `x11-apps` package on Trixie — it is no longer a standalone package).
+2. Generates a 32x32 transparent PNG with pure Python (no image libraries needed).
+3. Compiles it into an Xcursor file and installs it as the theme `~/.icons/blank`.
+4. Adds `XCURSOR_THEME=blank` and `XCURSOR_SIZE=24` to `~/.config/labwc/environment`.
+
+To undo it, remove those two lines from `~/.config/labwc/environment` and reboot.
+
 ---
 
 ## Common Gotchas

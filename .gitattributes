@@ -1,0 +1,4 @@
+# Shell scripts run on the Raspberry Pi (Linux) and MUST keep LF line endings.
+# CRLF would break the shebang (`/bin/bash^M: bad interpreter`). Pin them
+# regardless of each contributor's core.autocrlf setting.
+*.sh text eol=lf
